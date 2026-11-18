@@ -314,6 +314,45 @@ class Program
                 if (!string.IsNullOrEmpty(x.docName) && !docPwdCandidates.Contains(x.docName)) docPwdCandidates.Add(x.docName);
             }
 
+            Console.WriteLine($"[*] Document password candidates: {docPwdCandidates.Count} (including empty)");
+
+            // Debug: try first entry with verbose error reporting
+            if (unique.Count > 0 && decMethod != null && siInst != null)
+            {
+                var first = unique[0];
+                Console.WriteLine($"[*] Debug decrypt first entry: encPwd length={first.encPwd.Length}");
+                foreach (var dp in docPwdCandidates.Take(3))
+                {
+                    try {
+                        var result = decMethod.Invoke(siInst, new object[] { first.encPwd, false, dp });
+                        Console.WriteLine($"[*]   docPwd='{dp}' => result='{result}' (type={result?.GetType().Name ?? "null"})");
+                    } catch (Exception ex) {
+                        var inner = ex.InnerException ?? ex;
+                        Console.WriteLine($"[*]   docPwd='{dp}' => EXCEPTION: {inner.GetType().Name}: {inner.Message}");
+                    }
+                }
+                // Also try with swapped keys
+                try {
+                    var bf2 = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
+                    var siType2 = siInst.GetType();
+                    var strFields2 = siType2.GetFields(bf2).Where(f => f.FieldType == typeof(string)).ToList();
+                    if (strFields2.Count >= 2) {
+                        strFields2[0].SetValue(siInst, siKey2);
+                        strFields2[1].SetValue(siInst, siKey1);
+                        try {
+                            var result = decMethod.Invoke(siInst, new object[] { first.encPwd, false, "" });
+                            Console.WriteLine($"[*]   SWAPPED keys, docPwd='' => result='{result}'");
+                        } catch (Exception ex) {
+                            var inner = ex.InnerException ?? ex;
+                            Console.WriteLine($"[*]   SWAPPED keys => EXCEPTION: {inner.GetType().Name}: {inner.Message}");
+                        } finally {
+                            strFields2[0].SetValue(siInst, siKey1);
+                            strFields2[1].SetValue(siInst, siKey2);
+                        }
+                    }
+                } catch {}
+            }
+
             Console.WriteLine("\n##RESULTS_START##");
 
             var knownDocPwd = new Dictionary<string, string>();
