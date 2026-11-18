@@ -632,7 +632,17 @@ class Program
         foreach (var clrInfo in target.ClrVersions)
         {
             Console.WriteLine($"[*] CLR {clrInfo.Version}");
-            var runtime = clrInfo.CreateRuntime();
+            ClrRuntime runtime;
+            try {
+                runtime = clrInfo.CreateRuntime();
+            } catch {
+                var clrPath = clrInfo.ModuleInfo.FileName;
+                if (!string.IsNullOrEmpty(clrPath)) {
+                    var dacPath = Path.Combine(Path.GetDirectoryName(clrPath)!, "mscordaccore.dll");
+                    Console.WriteLine($"[*] Symbol server failed, using local DAC: {dacPath}");
+                    runtime = clrInfo.CreateRuntime(dacPath);
+                } else { throw; }
+            }
             var heap = runtime.Heap;
             Console.WriteLine($"[*] Scanning heap...");
 
