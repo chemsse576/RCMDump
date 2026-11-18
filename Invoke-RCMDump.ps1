@@ -181,7 +181,7 @@ $banner = @"
 
 Write-Host $banner -ForegroundColor Cyan
 
-# ─── Detect .NET SDK (needed for dump/offline) ───
+# ─── Detect .NET SDK (optional — not needed if HeapDumper.exe is present) ───
 $dotnetTfm = $null
 if ($Mode -in 'dump','offline') {
     try {
@@ -196,11 +196,9 @@ if ($Mode -in 'dump','offline') {
             }
         }
     } catch {}
-    if (-not $dotnetTfm) {
-        Write-Error "[-] .NET SDK not found. Install from https://dotnet.microsoft.com/download"
-        exit 1
+    if ($dotnetTfm) {
+        Write-Host "[*] .NET SDK: $dotnetTfm" -ForegroundColor DarkGray
     }
-    Write-Host "[*] .NET SDK: $dotnetTfm" -ForegroundColor DarkGray
 }
 
 # ═══════════════════════════════════════════
