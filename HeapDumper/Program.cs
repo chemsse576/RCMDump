@@ -99,6 +99,20 @@ class Program
             if (string.IsNullOrEmpty(siKey1))
             {
                 Console.WriteLine("[!] No SecurityInterface keys found on heap");
+                Console.WriteLine("[*] Dumping Royal/Security types on heap for diagnostics...");
+                var diagTypes = new HashSet<string>();
+                foreach (var obj in heap.EnumerateObjects())
+                {
+                    if (!obj.IsValid || obj.Type == null) continue;
+                    var tn = obj.Type.Name ?? "";
+                    if ((tn.Contains("Royal") || tn.Contains("Security") || tn.Contains("Credential")) && !tn.EndsWith("[]") && diagTypes.Add(tn))
+                    {
+                        var fields = string.Join(", ", obj.Type.Fields.Select(f => f.Name ?? "?"));
+                        Console.WriteLine($"    [{tn}] fields: {fields}");
+                    }
+                }
+                if (diagTypes.Count == 0)
+                    Console.WriteLine("    (none found - is a document open?)");
                 Console.WriteLine("\n##RESULTS_START##\n##RESULTS_END##");
                 return;
             }
