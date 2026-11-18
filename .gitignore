@@ -1,0 +1,11 @@
+bin/
+obj/
+*.exe
+*.dll
+*.pdb
+*.user
+*.suo
+.vs/
+*.rtsz
+Connections.db
+*.dmp
