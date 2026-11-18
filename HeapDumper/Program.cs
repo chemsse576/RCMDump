@@ -136,6 +136,48 @@ class Program
                 }
             }
 
+            // Phase 1b: Aggressive document password hunting
+            foreach (var obj in heap.EnumerateObjects())
+            {
+                if (!obj.IsValid || obj.Type == null) continue;
+                var tn = obj.Type.Name ?? "";
+
+                // Scan any object with password-related fields
+                foreach (var f in obj.Type.Fields)
+                {
+                    if (f.ElementType != ClrElementType.String) continue;
+                    var fn = (f.Name ?? "").ToLowerInvariant().Replace(">k__backingfield", "").TrimStart('_', '<');
+                    if (fn.Contains("password") || fn.Contains("passphrase") || fn.Contains("docpwd") || fn.Contains("documentpw"))
+                    {
+                        try {
+                            var val = obj.ReadStringField(f.Name);
+                            if (!string.IsNullOrEmpty(val) && val.Length >= 1 && val.Length <= 100 && !docPwdCandidates.Contains(val))
+                            {
+                                docPwdCandidates.Add(val);
+                            }
+                        } catch {}
+                    }
+                }
+
+                // TextBox / PasswordBox controls - read Text/Password property
+                if (tn.Contains("TextBox") || tn.Contains("PasswordBox") || tn.Contains("MaskedTextBox"))
+                {
+                    foreach (var f in obj.Type.Fields)
+                    {
+                        if (f.ElementType != ClrElementType.String) continue;
+                        var fn = (f.Name ?? "").ToLowerInvariant();
+                        if (fn.Contains("text") || fn.Contains("password") || fn.Contains("value"))
+                        {
+                            try {
+                                var val = obj.ReadStringField(f.Name);
+                                if (!string.IsNullOrEmpty(val) && val.Length >= 1 && val.Length <= 100 && !docPwdCandidates.Contains(val))
+                                    docPwdCandidates.Add(val);
+                            } catch {}
+                        }
+                    }
+                }
+            }
+
             Console.WriteLine($"[*] Found {allKeysets.Count} SecurityInterface keyset(s)");
             foreach (var ks in allKeysets)
                 Console.WriteLine($"[*]   doc={ks.doc}, key1={ks.key1.Length}c, key2={ks.key2.Length}c");
