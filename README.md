@@ -19,8 +19,20 @@ Supporte la reconnaissance, le dump mémoire avec déchiffrement direct, le déc
 ## Prérequis
 
 - Windows 10/11 avec PowerShell 5.1+
-- .NET 10 SDK (pour le mode `dump` — compilation automatique ClrMD)
-- Accès administrateur (lecture mémoire processus distants)
+- Аccès administrateur (lecture mémoire processus distants)
+- Pour le mode `dump` : soit le .NЕТ SDK (compilation auto), soit le binaire `HeapDumper.exe` pré-compilé
+
+## Build du scanner (pour cibles sans SDK)
+
+Sur la machine d'attaque (Kali, Windows avec .NЕТ SDK, etc.) :
+
+```bash
+cd HeapDumper
+dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -o ../build
+```
+
+Puis uploader `build/HeapDumper.exe` **à côté** de `Invoke-RCMDump.ps1` sur la cible.  
+Le script détecte automatiquement le binaire pré-compilé et l'utilise sans avoir besoin du SDK.
 
 ## Utilisation
 

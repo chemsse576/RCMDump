@@ -1,7 +1,6 @@
 bin/
 obj/
-*.exe
-*.dll
+build/
 *.pdb
 *.user
 *.suo
@@ -9,3 +8,5 @@ obj/
 *.rtsz
 Connections.db
 *.dmp
+HeapDumper/bin/
+HeapDumper/obj/
